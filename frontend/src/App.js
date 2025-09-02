@@ -16,21 +16,13 @@ const apiClient = axios.create({
 });
 
 function App() {
-    // --- ESTADOS DEL COMPONENTE ---
+    // --- ESTADOS ---
     const [propietarios, setPropietarios] = useState([]);
     const [nuevoPropietario, setNuevoPropietario] = useState({ numero_casa: '', nombre: '', apellido: '', correo_electronico: '' });
-    
-    // --- INICIO DE CAMBIOS: Estados para filtro y selección ---
     const [filtro, setFiltro] = useState('');
     const [seleccionados, setSeleccionados] = useState(new Set());
-    // --- FIN DE CAMBIOS ---
     
-    const [asunto, setAsunto] = useState(() => {
-        const fecha = new Date();
-        fecha.setMonth(fecha.getMonth() - 1); // Restar un mes
-        const mesAnterior = fecha.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }).toUpperCase();
-        return 'GASTO COMUN ' + mesAnterior;
-    });
+    const [asunto, setAsunto] = useState('Gastos Comunes del Mes');
     const [mensaje, setMensaje] = useState('');
     const [archivosComunes, setArchivosComunes] = useState([]);
     const [archivosIndividuales, setArchivosIndividuales] = useState([]);
@@ -38,38 +30,26 @@ function App() {
     const [log, setLog] = useState([]);
     const [enviando, setEnviando] = useState(false);
 
-    // --- LÓGICA DE GESTIÓN DE PROPIETARIOS (CONECTADA AL BACKEND) ---
-    
+    // --- INICIO DE CAMBIOS: Estados y referencias para el polling ---
+    const [loteId, setLoteId] = useState(null);
+    const pollingIntervalRef = useRef(null);
+    // --- FIN DE CAMBIOS ---
+
+
+    // --- LÓGICA DE GESTIÓN DE PROPIETARIOS (sin cambios) ---
     const fetchPropietarios = async () => {
         try {
-            const response = await apiClient.get('/propietarios/', {
-                headers: {
-                    
-                }
-            });
-
-            if (Array.isArray(response.data)) {
-                setPropietarios(response.data);
-            } else {
-                console.error("La respuesta de la API no es un arreglo:", response.data);
-                alert("Error: La respuesta del servidor no tiene el formato esperado.");
-                setPropietarios([]);
-            }
+            const response = await apiClient.get('/propietarios/', { headers: { 'ngrok-skip-browser-warning': 'true' } });
+            if (Array.isArray(response.data)) setPropietarios(response.data);
         } catch (error) {
             console.error("Error al cargar propietarios:", error);
             alert("No se pudo conectar con el servidor para cargar los propietarios.");
-            setPropietarios([]);
         }
     };
 
-    useEffect(() => {
-        fetchPropietarios();
-    }, []);
+    useEffect(() => { fetchPropietarios(); }, []);
 
-    const handlePropietarioChange = (e) => {
-        const { name, value } = e.target;
-        setNuevoPropietario(prev => ({ ...prev, [name]: value }));
-    };
+    const handlePropietarioChange = (e) => setNuevoPropietario(prev => ({ ...prev, [e.target.name]: e.target.value }));
 
     const handleAddPropietario = async (e) => {
         e.preventDefault();
@@ -78,31 +58,21 @@ function App() {
             fetchPropietarios();
             setNuevoPropietario({ numero_casa: '', nombre: '', apellido: '', correo_electronico: '' });
         } catch (error) {
-            console.error("Error al agregar propietario:", error);
             alert(`Error al agregar propietario: ${error.response?.data?.numero_casa || 'Verifique los datos.'}`);
         }
     };
 
     const handleDeletePropietario = async (numero_casa) => {
-        if (window.confirm(`¿Estás seguro de que quieres eliminar al propietario de la casa ${numero_casa}?`)) {
-            try {
-                await apiClient.delete(`/propietarios/${numero_casa}/`);
-                fetchPropietarios();
-            } catch (error) {
-                console.error("Error al eliminar propietario:", error);
-                alert("Error al eliminar propietario.");
-            }
+        if (window.confirm(`¿Seguro que quieres eliminar la casa ${numero_casa}?`)) {
+            await apiClient.delete(`/propietarios/${numero_casa}/`);
+            fetchPropietarios();
         }
     };
 
-    // --- INICIO DE CAMBIOS: Lógica para filtro y selección ---
     const handleSelectPropietario = (numero_casa) => {
         const newSeleccionados = new Set(seleccionados);
-        if (newSeleccionados.has(numero_casa)) {
-            newSeleccionados.delete(numero_casa);
-        } else {
-            newSeleccionados.add(numero_casa);
-        }
+        if (newSeleccionados.has(numero_casa)) newSeleccionados.delete(numero_casa);
+        else newSeleccionados.add(numero_casa);
         setSeleccionados(newSeleccionados);
     };
 
@@ -113,65 +83,83 @@ function App() {
     );
 
     const handleSelectAll = (e) => {
-        if (e.target.checked) {
-            const allIds = new Set(filteredPropietarios.map(p => p.numero_casa));
-            setSeleccionados(allIds);
-        } else {
-            setSeleccionados(new Set());
+        if (e.target.checked) setSeleccionados(new Set(filteredPropietarios.map(p => p.numero_casa)));
+        else setSeleccionados(new Set());
+    };
+
+
+    // --- LÓGICA DE ENVÍO Y POLLING (REESTRUCTURADA) ---
+    
+    const stopPolling = () => {
+        if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current);
+            pollingIntervalRef.current = null;
         }
     };
-    // --- FIN DE CAMBIOS ---
 
-    // --- LÓGICA DE ENVÍO DE CORREOS (CONECTADA AL BACKEND) ---
+    useEffect(() => {
+        // Este efecto se encarga de iniciar y detener el polling
+        if (loteId && enviando) {
+            pollingIntervalRef.current = setInterval(async () => {
+                try {
+                    const response = await apiClient.get(`/estado-lote/${loteId}/`);
+                    const { estado, logs } = response.data;
+                    setLog(logs); // Actualiza el log con la información más reciente
+
+                    if (estado === 'COMPLETADO' || estado === 'ERROR') {
+                        setEnviando(false);
+                        setLoteId(null);
+                        stopPolling();
+                    }
+                } catch (error) {
+                    console.error("Error durante el polling:", error);
+                    setLog(prev => [...prev, { tipo: 'error', casa: 'Sistema', mensaje: 'Se perdió la conexión con el servidor.' }]);
+                    setEnviando(false);
+                    setLoteId(null);
+                    stopPolling();
+                }
+            }, 3000); // Consulta el estado cada 3 segundos
+        }
+
+        return () => stopPolling(); // Limpia el intervalo si el componente se desmonta
+    }, [loteId, enviando]);
+
 
     const handleEnviar = async () => {
-        // --- INICIO DE CAMBIOS: Validar que haya seleccionados ---
         if (seleccionados.size === 0) {
-            alert('Debe seleccionar al menos un propietario para enviar correos.');
+            alert('Debe seleccionar al menos un propietario.');
             return;
         }
-        // --- FIN DE CAMBIOS ---
 
         setEnviando(true);
         setLog([]);
+        setLoteId(null); // Resetea el lote anterior
 
         const formData = new FormData();
         formData.append('asunto', asunto);
         formData.append('mensaje', mensaje);
-        
-        for (const file of archivosComunes) {
-            formData.append('archivos_comunes', file);
-        }
-        for (const file of archivosIndividuales) {
-            formData.append('archivos_individuales', file);
-        }
-
-        // --- INICIO DE CAMBIOS: Enviar IDs seleccionados ---
-        for (const casaId of seleccionados) {
-            formData.append('casas_seleccionadas', casaId);
-        }
-        // --- FIN DE CAMBIOS ---
+        for (const file of archivosComunes) formData.append('archivos_comunes', file);
+        for (const file of archivosIndividuales) formData.append('archivos_individuales', file);
+        for (const casaId of seleccionados) formData.append('casas_seleccionadas', casaId);
 
         try {
+            // La petición inicial ahora solo devuelve el ID del lote
             const response = await apiClient.post('/enviar-gastos/', formData, {
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                },
+                headers: { 'Content-Type': 'multipart/form-data' },
             });
-            setLog(response.data.log);
+            // Guardamos el ID del lote para iniciar el polling
+            setLoteId(response.data.lote_id);
+            setLog([{ tipo: 'info', casa: 'Sistema', mensaje: 'Proceso de envío iniciado. Obteniendo estado...' }]);
         } catch (error) {
-            console.error('Error en el proceso de envío:', error);
-            setLog(prev => [...prev, { tipo: 'error', casa: 'General', mensaje: `Error de conexión: ${error.message}` }]);
-        } finally {
+            console.error('Error al iniciar el envío:', error);
+            setLog([{ tipo: 'error', casa: 'Sistema', mensaje: `Error al iniciar: ${error.message}` }]);
             setEnviando(false);
         }
     };
 
     const LogItem = ({ item }) => {
-        let colorClass = 'text-gray-400';
-        if (item.tipo === 'success') colorClass = 'text-green-400';
-        if (item.tipo === 'error') colorClass = 'text-red-400';
-        return <p className={colorClass}>{item.mensaje}</p>;
+        const colorClass = item.tipo === 'success' ? 'text-green-400' : item.tipo === 'error' ? 'text-red-400' : 'text-gray-400';
+        return <p className={colorClass}>[{new Date(item.timestamp).toLocaleTimeString()}] {item.mensaje}</p>;
     };
 
     return (
@@ -181,16 +169,9 @@ function App() {
 
                 {/* SECCIÓN 1: GESTIÓN DE PROPIETARIOS */}
                 <div className="bg-white p-6 rounded-lg shadow-md mb-8">
-                    <div className="flex justify-between items-center mb-4 border-b pb-2">
-                        <h2 className="text-2xl font-semibold">1. Base de Propietarios</h2>
-                        <a 
-                            href={ADMIN_URL} 
-                            target="_blank" 
-                            rel="noopener noreferrer"
-                            className="bg-green-700 text-white font-bold text-sm py-1 px-3 rounded-md hover:bg-gray-700 transition-colors"
-                        >
-                            Admnistrar Propietarios
-                        </a>
+                     <div className="flex justify-between items-center mb-4 border-b pb-2">
+                        <h2 className="text-2xl font-semibold">1. Base de Propietarios (PostgreSQL)</h2>
+                        <a href={ADMIN_URL} target="_blank" rel="noopener noreferrer" className="bg-gray-600 text-white font-bold text-sm py-1 px-3 rounded-md hover:bg-gray-700 transition-colors">Ir a Admin</a>
                     </div>
                     <form onSubmit={handleAddPropietario} className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                         <input type="number" name="numero_casa" value={nuevoPropietario.numero_casa} onChange={handlePropietarioChange} placeholder="N° de Casa" className="p-2 border rounded-md" required />
@@ -200,32 +181,15 @@ function App() {
                         <button type="submit" className="md:col-span-2 bg-blue-600 text-white font-bold py-2 px-4 rounded-md hover:bg-blue-700 transition-colors">Agregar Propietario</button>
                     </form>
                     
-                    {/* --- INICIO DE CAMBIOS: Filtro de búsqueda --- */}
                     <div className="mb-4">
-                        <input
-                            type="text"
-                            placeholder="Filtrar por n° de casa, nombre o apellido..."
-                            className="p-2 border rounded-md w-full"
-                            value={filtro}
-                            onChange={e => setFiltro(e.target.value)}
-                        />
+                        <input type="text" placeholder="Filtrar por n° de casa, nombre o apellido..." className="p-2 border rounded-md w-full" value={filtro} onChange={e => setFiltro(e.target.value)} />
                     </div>
-                    {/* --- FIN DE CAMBIOS --- */}
 
                     <div className="overflow-x-auto">
                         <table className="min-w-full bg-white border">
                             <thead className="bg-gray-200">
                                 <tr>
-                                    {/* --- INICIO DE CAMBIOS: Checkbox para seleccionar todos --- */}
-                                    <th className="py-2 px-2 border-b">
-                                        <input
-                                            type="checkbox"
-                                            onChange={handleSelectAll}
-                                            checked={filteredPropietarios.length > 0 && seleccionados.size === filteredPropietarios.length}
-                                            disabled={filteredPropietarios.length === 0}
-                                        />
-                                    </th>
-                                    {/* --- FIN DE CAMBIOS --- */}
+                                    <th className="py-2 px-2 border-b"><input type="checkbox" onChange={handleSelectAll} checked={filteredPropietarios.length > 0 && seleccionados.size === filteredPropietarios.length} disabled={filteredPropietarios.length === 0} /></th>
                                     <th className="py-2 px-4 border-b">N° Casa</th>
                                     <th className="py-2 px-4 border-b">Nombre Completo</th>
                                     <th className="py-2 px-4 border-b">Correo(s)</th>
@@ -235,25 +199,13 @@ function App() {
                             <tbody>
                                 {filteredPropietarios.length > 0 ? filteredPropietarios.map(p => (
                                     <tr key={p.numero_casa}>
-                                        {/* --- INICIO DE CAMBIOS: Checkbox para selección individual --- */}
-                                        <td className="py-2 px-2 border-b text-center">
-                                            <input
-                                                type="checkbox"
-                                                checked={seleccionados.has(p.numero_casa)}
-                                                onChange={() => handleSelectPropietario(p.numero_casa)}
-                                            />
-                                        </td>
-                                        {/* --- FIN DE CAMBIOS --- */}
+                                        <td className="py-2 px-2 border-b text-center"><input type="checkbox" checked={seleccionados.has(p.numero_casa)} onChange={() => handleSelectPropietario(p.numero_casa)} /></td>
                                         <td className="py-2 px-4 border-b">{p.numero_casa}</td>
                                         <td className="py-2 px-4 border-b">{p.nombre} {p.apellido}</td>
                                         <td className="py-2 px-4 border-b">{p.correo_electronico}</td>
-                                        <td className="py-2 px-4 border-b text-center">
-                                            <button onClick={() => handleDeletePropietario(p.numero_casa)} className="btn-eliminar bg-red-500 text-white px-3 py-1 rounded-md text-sm hover:bg-red-600">Eliminar</button>
-                                        </td>
+                                        <td className="py-2 px-4 border-b text-center"><button onClick={() => handleDeletePropietario(p.numero_casa)} className="btn-eliminar bg-red-500 text-white px-3 py-1 rounded-md text-sm hover:bg-red-600">Eliminar</button></td>
                                     </tr>
-                                )) : (
-                                    <tr><td colSpan="5" className="text-center py-4">No se encontraron propietarios.</td></tr>
-                                )}
+                                )) : ( <tr><td colSpan="5" className="text-center py-4">No se encontraron propietarios.</td></tr> )}
                             </tbody>
                         </table>
                     </div>
@@ -264,18 +216,17 @@ function App() {
                     <h2 className="text-2xl font-semibold mb-4 border-b pb-2">2. Preparar y Enviar Correos ({seleccionados.size} seleccionados)</h2>
                     <div className="space-y-4">
                         <input type="text" value={asunto} onChange={e => setAsunto(e.target.value)} placeholder="Asunto del correo" className="w-full p-2 border rounded-md" />
-                        <textarea rows="8" value={mensaje} onChange={e => setMensaje(e.target.value)} placeholder="Escribe aquí el mensaje común para todos los propietarios..." className="w-full p-2 border rounded-md" />
+                        <textarea rows="8" value={mensaje} onChange={e => setMensaje(e.target.value)} placeholder="Escribe aquí el mensaje común..." className="w-full p-2 border rounded-md" />
                         <div>
-                            <label className="block font-medium mb-1">Adjuntos Comunes (para todos):</label>
+                            <label className="block font-medium mb-1">Adjuntos Comunes:</label>
                             <input type="file" multiple onChange={e => setArchivosComunes(Array.from(e.target.files))} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
                         </div>
                         <div>
-                            <label className="block font-medium mb-1">Carpeta con Gastos Individuales:</label>
-                            <p className="text-sm text-gray-600 mb-2">Selecciona los archivos individuales. Deben llamarse como el número de casa (ej. <strong>101.pdf</strong>, <strong>102.pdf</strong>).</p>
+                            <label className="block font-medium mb-1">Gastos Individuales:</label>
                             <input type="file" multiple onChange={e => setArchivosIndividuales(Array.from(e.target.files))} className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100" />
                         </div>
                         <button onClick={handleEnviar} disabled={enviando || seleccionados.size === 0} className="w-full bg-green-600 text-white font-bold py-3 px-4 rounded-md hover:bg-green-700 transition-colors text-lg disabled:bg-gray-400">
-                            {enviando ? 'Enviando...' : `Iniciar Envío a ${seleccionados.size} Propietarios`}
+                            {enviando ? 'Procesando...' : `Iniciar Envío a ${seleccionados.size} Propietarios`}
                         </button>
                     </div>
                 </div>
